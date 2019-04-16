@@ -1,4 +1,0 @@
-QA output created by 040
-Link count before rm foo_link_*: 3002
-Link count after rm foo_link_*: 1
-hello world

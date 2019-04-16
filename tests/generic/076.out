@@ -1,5 +1,0 @@
-QA output created by 076
-*** init fs
-*** test concurrent block/fs access
-*** done
-*** unmount

@@ -1,4 +1,0 @@
-QA output created by 537
-fstrim on regular mount
-fstrim on ro mount
-fstrim on ro mount with no log replay

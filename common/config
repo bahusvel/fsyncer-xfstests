@@ -132,11 +132,6 @@ export DF_PROG="$(type -P df)"
 export XFS_IO_PROG="$(type -P xfs_io)"
 [ "$XFS_IO_PROG" = "" ] && _fatal "xfs_io not found"
 
-export MKSWAP_PROG="$(type -P mkswap)"
-# mkswap from util-linux v2.17.2 or older needs "-f" option to force to erase
-# bootbits sectors
-MKSWAP_PROG="$MKSWAP_PROG -f"
-
 export XFS_LOGPRINT_PROG="$(type -P xfs_logprint)"
 export XFS_REPAIR_PROG="$(type -P xfs_repair)"
 export XFS_DB_PROG="$(type -P xfs_db)"
@@ -175,7 +170,6 @@ export WIPEFS_PROG="$(type -P wipefs)"
 export DUMP_PROG="$(type -P dump)"
 export RESTORE_PROG="$(type -P restore)"
 export LVM_PROG="$(type -P lvm)"
-export LSATTR_PROG="$(type -P lsattr)"
 export CHATTR_PROG="$(type -P chattr)"
 export DEBUGFS_PROG="$(type -P debugfs)"
 export UUIDGEN_PROG="$(type -P uuidgen)"
@@ -199,7 +193,6 @@ export GETCAP_PROG="$(type -P getcap)"
 export CHECKBASHISMS_PROG="$(type -P checkbashisms)"
 export XFS_INFO_PROG="$(type -P xfs_info)"
 export DUPEREMOVE_PROG="$(type -P duperemove)"
-export CC_PROG="$(type -P cc)"
 
 # use 'udevadm settle' or 'udevsettle' to wait for lv to be settled.
 # newer systems have udevadm command but older systems like RHEL5 don't.
@@ -257,17 +250,15 @@ if [ -x /usr/sbin/selinuxenabled ] && /usr/sbin/selinuxenabled; then
 fi
 
 # check if mkfs.xfs supports v5 xfs
-if [ "$FSTYP" == "xfs" ]; then
-	XFS_MKFS_HAS_NO_META_SUPPORT=""
-	touch /tmp/crc_check.img
-	$MKFS_XFS_PROG -N -d file,name=/tmp/crc_check.img,size=32m -m crc=0 \
-		>/dev/null 2>&1;
-	if [ $? -ne 0 ]; then
-		XFS_MKFS_HAS_NO_META_SUPPORT=true
-	fi
-	rm -f /tmp/crc_check.img
-	export XFS_MKFS_HAS_NO_META_SUPPORT
+XFS_MKFS_HAS_NO_META_SUPPORT=""
+touch /tmp/crc_check.img
+$MKFS_XFS_PROG -N -d file,name=/tmp/crc_check.img,size=32m -m crc=0 \
+	>/dev/null 2>&1;
+if [ $? -ne 0 ]; then
+	XFS_MKFS_HAS_NO_META_SUPPORT=true
 fi
+rm -f /tmp/crc_check.img
+export XFS_MKFS_HAS_NO_META_SUPPORT
 
 _mount_opts()
 {
@@ -377,7 +368,7 @@ _mkfs_opts()
 	reiserfs)
 		export MKFS_OPTIONS="$REISERFS_MKFS_OPTIONS -q"
 		;;
-       reiser4)
+    reiser4)
 		export MKFS_OPTIONS=$REISER4_MKFS_OPTIONS
 		;;
 	gfs2)
@@ -465,13 +456,12 @@ _check_device()
 	fi
 
 	case "$FSTYP" in
-	9p|tmpfs)
+	9p)
 		# 9p mount tags are just plain strings, so anything is allowed
-		# tmpfs doesn't use mount source, ignore
 		;;
 	overlay)
 		if [ ! -d "$dev" ]; then
-			_fatal "common/config: $name ($dev) is not a directory for overlay"
+			_fatal "common/config: $name ($dev) is not a directory for $FSTYP"
 		fi
 		;;
 	ubifs)
@@ -479,6 +469,9 @@ _check_device()
 			_fatal "common/config: $name ($dev) is not a character device"
 		fi
 		;;
+	fuse.fsyncd)
+	#fsyncd is just fsyncd
+	;;
 	*)
 		_fatal "common/config: $name ($dev) is not a block device or a network filesystem"
 	esac
@@ -540,7 +533,7 @@ _overlay_config_override()
 	[ -b "$TEST_DEV" ] || return 0
 
 	# Config file may specify base fs type, but we obay -overlay flag
-	[ "$FSTYP" == overlay ] || export OVL_BASE_FSTYP="$FSTYP"
+	export OVL_BASE_FSTYP="$FSTYP"
 	export FSTYP=overlay
 
 	# Store original base fs vars
@@ -665,15 +658,6 @@ get_next_config() {
 	# set default RESULT_BASE
 	if [ -z "$RESULT_BASE" ]; then
 		export RESULT_BASE="$here/results/"
-	fi
-
-	if [ "$FSTYP" == "tmpfs" ]; then
-		if [ -z "TEST_DEV" ]; then
-			export TEST_DEV=tmpfs_test
-		fi
-		if [ -z "SCRATCH_DEV" ]; then
-			export TEST_DEV=tmpfs_scratch
-		fi
 	fi
 
 	#  Mandatory Config values.

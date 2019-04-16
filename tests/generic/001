@@ -15,6 +15,7 @@
 # config has one line per file with filename and byte size, else use
 # the default one below.
 #
+
 seq=`basename $0`
 seqres=$RESULT_DIR/$seq
 echo "QA output created by $seq"

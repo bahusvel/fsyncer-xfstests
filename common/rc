@@ -147,6 +147,9 @@ case "$FSTYP" in
 	 ;;
     glusterfs)
 	 ;;
+    fuse.fsyncd)
+	 . ./common/fsyncer
+	 ;;
     overlay)
 	 . ./common/overlay
 	 ;;
@@ -327,6 +330,9 @@ _try_scratch_mount()
 	if [ "$FSTYP" == "overlay" ]; then
 		_overlay_scratch_mount $*
 		return $?
+	elif [ "$FSTYP" == "fuse.fsyncd" ]; then
+		_fsyncer_mount $SCRATCH_DEV $SCRATCH_MNT $*
+		return $?
 	fi
 	_mount -t $FSTYP `_scratch_mount_options $*`
 }
@@ -343,7 +349,7 @@ _scratch_unmount()
 	overlay)
 		_overlay_scratch_unmount
 		;;
-	btrfs)
+	btrfs|fuse.fsyncd)
 		$UMOUNT_PROG $SCRATCH_MNT
 		;;
 	*)
@@ -356,8 +362,20 @@ _scratch_remount()
 {
     local opts="$1"
 
+    if [ -z "$opts" ]; then
+        # generic/416 calls this function without any options
+        return 0
+    fi
+    if [ "$FSTYP" == "fuse.fsyncd" -a "$opts" == "ro" ]; then
+        _fsyncer_mount $SCRATCH_DEV $SCRATCH_MNT -o remount,ro
+        return $?
+    elif [ "$FSTYP" == "fuse.fsyncd" ]; then
+        echo "_scratch_remount: fsyncer does not support option '$opts'"
+        return 1
+    fi
+
     if test -n "$opts"; then
-	_try_scratch_mount "-o remount,$opts"
+	mount -o "remount,$opts" $SCRATCH_MNT
     fi
 }
 
@@ -398,6 +416,9 @@ _test_mount()
     if [ "$FSTYP" == "overlay" ]; then
         _overlay_test_mount $*
         return $?
+    elif [ "$FSTYP" == "fuse.fsyncd" ]; then
+        _fsyncer_mount $TEST_DEV $TEST_DIR $*
+        return $?
     fi
     _test_options mount
     _mount -t $FSTYP $TEST_OPTIONS $TEST_FS_MOUNT_OPTS $SELINUX_MOUNT_OPTIONS $* $TEST_DEV $TEST_DIR
@@ -407,6 +428,9 @@ _test_unmount()
 {
 	if [ "$FSTYP" == "overlay" ]; then
 		_overlay_test_unmount
+	elif [ "$FSTYP" == "fuse.fsyncd" ]; then
+		echo "Attempting to unmount"
+		$UMOUNT_PROG $TEST_DIR
 	else
 		$UMOUNT_PROG $TEST_DEV
 	fi
@@ -693,7 +717,7 @@ _scratch_mkfs()
 	local mkfs_status
 
 	case $FSTYP in
-	nfs*|cifs|ceph|overlay|glusterfs|pvfs2|9p)
+	nfs*|cifs|ceph|overlay|glusterfs|pvfs2|9p|fuse.fsyncd)
 		# unable to re-create this fstyp, just remove all files in
 		# $SCRATCH_MNT to avoid EEXIST caused by the leftover files
 		# created in previous runs
@@ -969,10 +993,7 @@ _scratch_mkfs_sized()
 	;;
     btrfs)
 	local mixed_opt=
-	# minimum size that's needed without the mixed option.
-	# Ref: btrfs-prog: btrfs_min_dev_size()
-	# Non mixed mode is also the default option.
-	(( fssize < $((256 * 1024 *1024)) )) && mixed_opt='--mixed'
+	(( fssize <= 1024 * 1024 * 1024 )) && mixed_opt='--mixed'
 	$MKFS_BTRFS_PROG $MKFS_OPTIONS $mixed_opt -b $fssize $SCRATCH_DEV
 	;;
     jfs)
@@ -1444,6 +1465,14 @@ _check_mounted_on()
 _require_scratch_nocheck()
 {
     case "$FSTYP" in
+	fuse.fsyncd)
+		if [ ! -d "$SCRATCH_DEV" ]; then
+			_notrun "this test requires a directory for \$SCRATCH_DEV"
+		fi
+		if [ ! -d "$SCRATCH_MNT" ]; then
+			_notrun "this test requires a directory for \$SCRATCH_MNT"
+		fi
+		;;
 	glusterfs)
 		echo $SCRATCH_DEV | egrep -q ":/?" > /dev/null 2>&1
 		if [ -z "$SCRATCH_DEV" -o "$?" != "0" ]; then
@@ -1568,6 +1597,9 @@ _require_scratch_size()
 _require_test()
 {
     case "$FSTYP" in
+	fuse.fsyncd)
+		# Fsyncd is just fsyncd
+		;;
 	glusterfs)
 		echo $TEST_DEV | egrep -q ":/?" > /dev/null 2>&1
 		if [ -z "$TEST_DEV" -o "$?" != "0" ]; then
@@ -1991,9 +2023,7 @@ _yp_active()
 	local dn
 	dn=$(domainname 2>/dev/null)
 	local ypcat=$(type -P ypcat)
-	local rpcinfo=$(type -P rpcinfo)
-	test -n "${dn}" -a "${dn}" != "(none)" -a "${dn}" != "localdomain" -a -n "${ypcat}" -a -n "${rpcinfo}" && \
-		"${rpcinfo}" -p localhost 2>/dev/null | grep -q ypbind
+	test -n "${dn}" -a "${dn}" != "(none)" -a "${dn}" != "localdomain" -a -n "${ypcat}"
 	echo $?
 }
 
@@ -2210,28 +2240,15 @@ _format_swapfile() {
 	# Swap files must be nocow on Btrfs.
 	$CHATTR_PROG +C "$fname" > /dev/null 2>&1
 	_pwrite_byte 0x61 0 "$sz" "$fname" >> $seqres.full
-	$MKSWAP_PROG "$fname" >> $seqres.full
+	mkswap "$fname" >> $seqres.full
 }
 
 # Check that the filesystem supports swapfiles
 _require_scratch_swapfile()
 {
 	_require_scratch
-	_require_command "$MKSWAP_PROG" "mkswap"
 
 	_scratch_mkfs >/dev/null
-
-	# With mounting SELinux context(e.g. system_u:object_r:root_t:s0),
-	# standard mkswap tried to reset the type of default context to
-	# swapfile_t if it's not swapfile_t, and then it failed and returned
-	# ENOTSUP expectedly as we don't want to create any SELinux attr on
-	# purpose.  standard mkswap ignored this relabel error by commit
-	# d97dc0e of util-linux, but it still reported the error before
-	# commit d97dc0e.  We mount swapfile context directly to skip the
-	# reset step.
-	[ -n "$SELINUX_MOUNT_OPTIONS" ] && export \
-		SELINUX_MOUNT_OPTIONS="-o context=system_u:object_r:swapfile_t:s0"
-
 	_scratch_mount
 
 	# Minimum size for mkswap is 10 pages
@@ -2296,53 +2313,6 @@ _ext4_disable_extent_zeroout()
 
 	[ -f /sys/fs/ext4/$sdev/extent_max_zeroout_kb ] && \
 		echo 0 >/sys/fs/ext4/$sdev/extent_max_zeroout_kb
-}
-
-# The default behavior of SEEK_HOLE is to always return EOF.
-# Filesystems that implement non-default behavior return the offset
-# of holes with SEEK_HOLE. There is no way to query the filesystem
-# of which behavior it is implementing.
-# We use this whitelist FSTYP, to set expectation and avoid silent
-# regression of filesystem seek hole behavior.
-#
-# Return 0 for true
-_fstyp_has_non_default_seek_data_hole()
-{
-	if [ -z $1 ]; then
-		local fstyp=$FSTYP
-	else
-		local fstyp=$1
-	fi
-
-	case "$fstyp" in
-	btrfs|ext4|xfs|ceph|cifs|f2fs|gfs2|nfs*|ocfs2|tmpfs)
-		return 0
-		;;
-	overlay)
-		if [ ! -z $OVL_BASE_FSTYP -a $OVL_BASE_FSTYP != "overlay" ]; then
-			_fstyp_has_non_default_seek_data_hole $OVL_BASE_FSTYP
-			return $?
-		else
-			# Assume that base fs has default behavior
-			return 1
-		fi
-		;;
-	*)
-		# by default fstyp has default SEEK_HOLE behavior;
-		# if your fs has non-default behavior, add it to whitelist above!
-		return 1
-		;;
-	esac
-}
-
-# Run seek sanity test with predefined expectation for SEEK_DATA/HOLE behavior
-_run_seek_sanity_test()
-{
-	local testseekargs
-	if _fstyp_has_non_default_seek_data_hole; then
-		testseekargs+="-f"
-	fi
-	$here/src/seek_sanity_test $testseekargs $*
 }
 
 # Check if the file system supports seek_data/hole
@@ -2529,6 +2499,10 @@ _mount_or_remount_rw()
 			return 0 # ok=0
 		fi
 	else
+		if [ "$FSTYP" == "fuse.fsyncd" ]; then
+			echo "fsyncer does not support remounting"
+			return 0
+		fi
 		_remount $device rw
 	fi
 
@@ -2636,6 +2610,9 @@ _check_udf_filesystem()
 _check_test_fs()
 {
     case $FSTYP in
+    fuse.fsyncd)
+	# no way to check consistency for fuse
+	;;
     xfs)
 	_check_xfs_test_fs
 	;;
@@ -2683,6 +2660,9 @@ _check_scratch_fs()
     [ $# -eq 1 ] && device=$1
 
     case $FSTYP in
+    fuse.fsyncd)
+	# no way to check consistency for fuse
+	;;
     xfs)
 	local scratch_log="none"
 	local scratch_rt="none"
@@ -3008,6 +2988,18 @@ _require_scratch_dev_pool_equal_size()
 	done
 }
 
+# We will check if the device is deletable
+_require_deletable_scratch_dev_pool()
+{
+	local i
+	local x
+	for i in $SCRATCH_DEV_POOL; do
+		x=`echo $i | cut -d"/" -f 3`
+		if [ ! -f /sys/class/block/${x}/device/delete ]; then
+			_notrun "$i is a device which is not deletable"
+		fi
+	done
+}
 
 # Check that fio is present, and it is able to execute given jobfile
 _require_fio()
@@ -3280,7 +3272,7 @@ _require_atime()
 {
 	_exclude_scratch_mount_option "noatime"
 	case $FSTYP in
-	nfs|cifs)
+	nfs|cifs|fuse.fsyncd)
 		_notrun "atime related mount options have no effect on $FSTYP"
 		;;
 	esac
@@ -3535,7 +3527,7 @@ _check_dmesg()
 # capture the kmemleak report
 _capture_kmemleak()
 {
-	local kern_knob="$DEBUGFS_MNT/kmemleak"
+	local kern_knob="${DEBUGFS_MNT}/kmemleak"
 	local leak_file="$1"
 
 	# Tell the kernel to scan for memory leaks.  Apparently the write
@@ -3556,20 +3548,10 @@ ENDL
 	echo "clear" > "$kern_knob"
 }
 
-# Figure out if the running kernel supports kmemleak; if it does, clear out
-# anything that leaked before we even started testing.  The leak checker only
-# needs to be primed like this once per ./check invocation.
-_detect_kmemleak()
+# set up kmemleak
+_init_kmemleak()
 {
-	local kern_knob="$DEBUGFS_MNT/kmemleak"
-	KMEMLEAK_CHECK_FILE="/tmp/check_kmemleak"
-
-	# Since kernel v4.19-rc3, the kmemleak knob exists even if kmemleak is
-	# disabled, but returns EBUSY on write. So instead of relying on
-	# existance of writable knob file, we use a test file to indicate that
-	# _check_kmemleak() is enabled only if we actually managed to write to
-	# the knob file.
-	rm -f "$KMEMLEAK_CHECK_FILE"
+	local kern_knob="${DEBUGFS_MNT}/kmemleak"
 
 	if [ ! -w "$kern_knob" ]; then
 		return 0
@@ -3577,28 +3559,17 @@ _detect_kmemleak()
 
 	# Disable the automatic scan so that we can control it completely,
 	# then dump all the leaks recorded so far.
-	if echo "scan=off" > "$kern_knob" 2>/dev/null; then
-		_capture_kmemleak /dev/null
-		touch "$KMEMLEAK_CHECK_FILE"
-	fi
+	echo "scan=off" > "$kern_knob"
+	_capture_kmemleak /dev/null
 }
 
-# Kick the kmemleak checker to scan for leaks.  Background leak scan mode is
-# not enabled, so we must call the kernel to ask for a scan and deal with the
-# results appropriately.  This we do after every test completes, whether or not
-# it was successful.
+# check kmemleak log
 _check_kmemleak()
 {
-	local kern_knob="$DEBUGFS_MNT/kmemleak"
-	local leak_file="$seqres.kmemleak"
+	local kern_knob="${DEBUGFS_MNT}/kmemleak"
+	local leak_file="${seqres}.kmemleak"
 
-	if [ ! -f "$KMEMLEAK_CHECK_FILE" ]; then
-		return 0
-	fi
-
-	# Not enabled, so discard any report of leaks found.
-	if [ "$USE_KMEMLEAK" != "yes" ]; then
-		_capture_kmemleak /dev/null
+	if [ ! -w "$kern_knob" ]; then
 		return 0
 	fi
 
@@ -3643,6 +3614,8 @@ init_rc()
 			fi
 		fi
 	fi
+
+	
 
 	# Sanity check that TEST partition is not mounted at another mount point
 	# or as another fs type
@@ -3845,45 +3818,6 @@ _require_scratch_feature()
 	esac
 }
 
-# Get the maximum size of a file in $TEST_DIR (s_maxbytes).  On ext4 this will
-# be UINT32_MAX * block_size, but other filesystems may allow up to LLONG_MAX.
-_get_max_file_size()
-{
-	local testfile=$TEST_DIR/maxfilesize.$seq
-	local l=0
-	local r=9223372036854775807 # LLONG_MAX
-
-	rm -f $testfile
-	while (( l < r )); do
-		# Use _math() to avoid signed integer overflow.
-		local m=$(_math "($l + $r + 1) / 2")
-		if $XFS_IO_PROG -f -c "truncate $m" $testfile \
-			|& grep -q 'File too large'
-		then
-			r=$(( m - 1 ))
-		else
-			l=$m
-		fi
-	done
-	echo $l
-}
-
-# get MAX_LFS_FILESIZE
-_get_max_lfs_filesize()
-{
-	case "$(getconf LONG_BIT)" in
-	"32")
-		echo $(( ($(getconf PAGE_SIZE) << ($(getconf LONG_BIT) - 1) ) - 1))
-		;;
-	"64")
-		echo 9223372036854775807
-		;;
-	*)
-		_fail "sizeof(long) == $(getconf LONG_BIT)?"
-		;;
-	esac
-}
-
 # The maximum filesystem label length, /not/ including terminating NULL
 _label_get_max()
 {
@@ -3919,62 +3853,6 @@ _dmsetup_create()
 	$DMSETUP_PROG create "$@" >>$seqres.full 2>&1 || return 1
 	$DMSETUP_PROG mknodes >/dev/null 2>&1
 	$UDEV_SETTLE_PROG >/dev/null 2>&1
-}
-
-_require_btime()
-{
-	# Note: filesystems are not required to report btime (creation time)
-	# if the caller doesn't ask for it, so we define STATX_BTIME here and
-	# pass it in to the statx command.
-	export STATX_BTIME=0x800
-	$XFS_IO_PROG -f $TEST_DIR/test_creation_time -c "statx -m $STATX_BTIME -v" \
-		| grep btime >>$seqres.full 2>&1 || \
-		_notrun "inode creation time not supported by this filesystem"
-	rm -f $TEST_DIR/test_creation_time
-}
-
-_require_scratch_btime()
-{
-	_require_scratch
-	_scratch_mkfs > /dev/null 2>&1
-	_scratch_mount
-
-	# Note: filesystems are not required to report btime (creation time)
-	# if the caller doesn't ask for it, so we define STATX_BTIME here and
-	# pass it in to the statx command.
-	export STATX_BTIME=0x800
-	$XFS_IO_PROG -f $SCRATCH_MNT/test_creation_time -c "statx -m $STATX_BTIME -v" \
-		| grep btime >>$seqres.full 2>&1 || \
-		_notrun "inode creation time not supported by this filesystem"
-
-	_scratch_unmount
-}
-
-_require_filefrag_options()
-{
-	_require_command "$FILEFRAG_PROG" filefrag
-
-	local options=$1
-	local file="$TEST_DIR/options_testfile"
-
-	echo "XX" > $file
-	${FILEFRAG_PROG} -$options $file 2>&1 | grep -q "invalid option" && \
-		_notrun "filefrag doesn't support $options option"
-	rm -f $file
-}
-
-_require_fibmap()
-{
-	_require_filefrag_options "B"
-
-	local file="$TEST_DIR/fibmap_testfile"
-
-	echo "XX" > $file
-	${FILEFRAG_PROG} -B $file 2>&1 | grep -q "FIBMAP[[:space:]]*unsupported"
-	if [ $? -eq 0 ]; then
-		_notrun "FIBMAP not supported by this filesystem"
-	fi
-	rm -f $file
 }
 
 init_rc

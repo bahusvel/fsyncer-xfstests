@@ -21,7 +21,6 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _cleanup()
 {
-	exec {test_fd}<&-
 	cd /
 	rm -f $tmp.*
 }
@@ -46,9 +45,9 @@ tf_inode=$(stat -c %i $testfile)
 echo inode $tf_inode >> $seqres.full
 
 # Create new fd by exec
-exec {test_fd}> $testfile
+exec 9> $testfile
 # flock locks the fd then exits, we should see the lock info even the owner is dead
-flock -x $test_fd
+flock -x 9
 cat /proc/locks >> $seqres.full
 
 # Checking

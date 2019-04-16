@@ -500,7 +500,7 @@ _expunge_test()
 	return 0
 }
 
-_detect_kmemleak
+#_detect_kmemleak
 _prepare_test_list
 
 if $OPTIONS_HAVE_SECTIONS; then

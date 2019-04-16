@@ -1,8 +1,0 @@
-QA output created by 270
-
-Run fsstress
-
-Run dd writers in parallel
-Comparing user usage
-Comparing group usage
-Comparing filesystem consistency
