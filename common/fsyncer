@@ -1,0 +1,24 @@
+#
+# fsyncer specific common functions.
+#
+
+_fsyncer_mount()
+{
+	local dir=$1
+	local mnt=$2
+	# $3 ... -o
+	# $4 ... remount,ro / nosuid / etc
+
+	o="dev,suid"
+	if [[ "$4" == *"remount"* ]]; then
+		killall fsyncd
+		fusermount3 -u $2
+	fi
+	if [[ "$4" == *"ro"* ]]; then
+		o="$o,ro"
+	elif [[ "$4" == "nosuid" ]]; then
+		# Drop suid option
+		o="dev"
+	fi
+	$FSYNCD_BIN server $mnt -- -o allow_other
+}
